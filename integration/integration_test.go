@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
@@ -55,6 +56,15 @@ type HealthRes struct {
 	Drifted bool `json:"drifted"`
 }
 
+// ValidateWith covers the state-aware validator layer: reject the switch
+// while the entity is being deleted.
+func (b BlueGreen) ValidateWith(s k8slib.Snap[Deployment]) error {
+	if s.MarkedForDeletion {
+		return fmt.Errorf("entity is being deleted")
+	}
+	return nil
+}
+
 func (Health) Name() entity.QueryName { return "health" }
 func (Health) Result() HealthRes      { return HealthRes{} }
 
@@ -89,6 +99,7 @@ func newDeploymentKind() *k8slib.Kind[Deployment] {
 		k8slib.WithReconcileEvery[Deployment](2*time.Second),
 		k8slib.WithPolling[Deployment](100*time.Millisecond, 200),
 		k8slib.WithForceCANEveryNCommands[Deployment](2),
+		k8slib.WithSearchAttributes[Deployment](true),
 	)
 
 	entdefine.Handle(k.Def(),
@@ -101,6 +112,19 @@ func newDeploymentKind() *k8slib.Kind[Deployment] {
 				Step("provision-green",
 					func(c workflow.Context) error { return k8slib.ApplyObject(c, gvk, greenRef, green) },
 					func(c workflow.Context) error { return k8slib.DeleteObject(c, gvk, greenRef) },
+				).
+				Step("verify-green",
+					func(c workflow.Context) error {
+						_, found, err := k8slib.GetObject[Deployment](c, gvk, greenRef)
+						if err != nil {
+							return err
+						}
+						if !found {
+							return fmt.Errorf("green object missing")
+						}
+						return nil
+					},
+					nil,
 				).
 				Step("warmup",
 					func(c workflow.Context) error {
@@ -147,6 +171,10 @@ func TestEntityLifecycle(t *testing.T) {
 		ExistingPath:  os.Getenv("TEMPORAL_CLI"),
 		ClientOptions: &client.Options{},
 		LogLevel:      "error",
+		SearchAttributes: temporal.NewSearchAttributes(
+			entdefine.SearchAttrKind.ValueSet("seed"),
+			entdefine.SearchAttrPhase.ValueSet("seed"),
+		),
 	})
 	if err != nil {
 		t.Fatalf("start dev server: %v", err)
@@ -287,5 +315,63 @@ func TestEntityLifecycle(t *testing.T) {
 	// 9. Commands to a deleted entity are rejected.
 	if _, err := entclient.Exec(ctx, web, webID, k8slib.Apply[Deployment]{Spec: Deployment{Image: "nginx:1.27", Replicas: 1}}); err == nil {
 		t.Fatal("command to deleted entity accepted")
+	}
+
+	// 10. CreateOrAttach: first call creates, second attaches to the same run.
+	apiRef := k8slib.ObjectRef{Namespace: "prod", Name: "api"}
+	run1, err := web.CreateOrAttach(ctx, apiRef.ID(), Deployment{Image: "api:1", Replicas: 1})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !waitFor(func() bool {
+		d, err := web.Describe(ctx, apiRef.ID())
+		return err == nil && d.Phase == entity.PhaseReady
+	}) {
+		t.Fatal("created entity not ready")
+	}
+	run2, err := web.CreateOrAttach(ctx, apiRef.ID(), Deployment{Image: "api:2", Replicas: 9})
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if run1.GetRunID() != run2.GetRunID() {
+		t.Fatalf("attach spawned a new run: %s vs %s", run1.GetRunID(), run2.GetRunID())
+	}
+	if err := web.Delete(ctx, apiRef.ID()); err != nil {
+		t.Fatalf("delete api: %v", err)
+	}
+
+	// 11. Failing creation -> create_failed phase, error surfaced to caller.
+	brokenRef := k8slib.ObjectRef{Namespace: "prod", Name: "broken"}
+	cluster.FailApplyWith(string(gvk), string(brokenRef.ID()),
+		temporal.NewNonRetryableApplicationError("quota exceeded", "QuotaError", nil))
+	if _, err := entclient.ExecWithStart(ctx, web, brokenRef.ID(),
+		Deployment{Image: "broken:1", Replicas: 1},
+		k8slib.Apply[Deployment]{Spec: Deployment{Image: "broken:1", Replicas: 1}}); err == nil {
+		t.Fatal("creation against failing cluster succeeded")
+	}
+	if !waitFor(func() bool {
+		d, err := web.Describe(ctx, brokenRef.ID())
+		return err == nil && d.Phase == entity.PhaseCreateFailed
+	}) {
+		t.Fatal("phase is not create_failed")
+	}
+
+	// 12. Failing finalizer -> delete_failed phase.
+	fragileRef := k8slib.ObjectRef{Namespace: "prod", Name: "fragile"}
+	if _, err := entclient.ExecWithStart(ctx, web, fragileRef.ID(),
+		Deployment{Image: "fragile:1", Replicas: 1},
+		k8slib.Apply[Deployment]{Spec: Deployment{Image: "fragile:1", Replicas: 1}}); err != nil {
+		t.Fatalf("create fragile: %v", err)
+	}
+	cluster.FailDeleteWith(string(gvk), string(fragileRef.ID()),
+		temporal.NewNonRetryableApplicationError("stuck finalizer", "StuckError", nil))
+	if err := web.Delete(ctx, fragileRef.ID()); err != nil {
+		t.Fatalf("delete fragile: %v", err)
+	}
+	if !waitFor(func() bool {
+		d, err := web.Describe(ctx, fragileRef.ID())
+		return err == nil && d.Phase == entity.PhaseDeleteFailed
+	}) {
+		t.Fatal("phase is not delete_failed")
 	}
 }

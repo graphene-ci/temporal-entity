@@ -23,6 +23,9 @@ type Cluster struct {
 	// manifest and returns the next observed one — simulating a cluster
 	// that reaches readiness asynchronously.
 	Converge func(live []byte) []byte
+
+	failApply  map[string]error
+	failDelete map[string]error
 }
 
 // New creates an empty in-memory cluster.
@@ -32,10 +35,35 @@ func New() *Cluster {
 
 func key(gvk, id string) string { return gvk + "|" + id }
 
+// FailApplyWith makes subsequent Apply calls for the object return err
+// (nil clears). Error injection for tests.
+func (c *Cluster) FailApplyWith(gvk, id string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failApply == nil {
+		c.failApply = map[string]error{}
+	}
+	c.failApply[key(gvk, id)] = err
+}
+
+// FailDeleteWith makes subsequent Delete calls for the object return err
+// (nil clears). Error injection for tests.
+func (c *Cluster) FailDeleteWith(gvk, id string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failDelete == nil {
+		c.failDelete = map[string]error{}
+	}
+	c.failDelete[key(gvk, id)] = err
+}
+
 // Apply upserts the object (idempotent).
 func (c *Cluster) Apply(_ context.Context, gvk, id string, manifest []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.failApply[key(gvk, id)]; err != nil {
+		return err
+	}
 	c.objects[key(gvk, id)] = &object{live: append([]byte(nil), manifest...)}
 	return nil
 }
@@ -58,6 +86,9 @@ func (c *Cluster) Get(_ context.Context, gvk, id string) ([]byte, bool, error) {
 func (c *Cluster) Delete(_ context.Context, gvk, id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.failDelete[key(gvk, id)]; err != nil {
+		return err
+	}
 	delete(c.objects, key(gvk, id))
 	return nil
 }

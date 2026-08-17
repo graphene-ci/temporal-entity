@@ -30,6 +30,15 @@ test: ## Run unit tests and the dev-server integration suite
 test-unit: ## Run unit tests only
 	go test -short ./...
 
+COVER_THRESHOLD := 80
+
+.PHONY: cover
+cover: ## Run all tests with coverage and enforce the threshold
+	TEMPORAL_CLI=$(BIN)/temporal go test -coverprofile=coverage.out -coverpkg=./pkg/...,./internal/... ./... -timeout 5m
+	@go tool cover -func=coverage.out | tail -1
+	@go tool cover -func=coverage.out | tail -1 | \
+		awk '{gsub("%","",$$3); if ($$3+0 < $(COVER_THRESHOLD)) { printf "coverage %s%% is below the $(COVER_THRESHOLD)%% threshold\n", $$3; exit 1 }}'
+
 .PHONY: lint
 lint: ## Run Go linters
 	$(BIN)/golangci-lint run ./...
