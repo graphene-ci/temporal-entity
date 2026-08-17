@@ -1,0 +1,19 @@
+version: "2"
+run:
+  go: "1.25"
+output:
+  formats:
+    text:
+      path: stdout
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - exhaustive
+    - gocritic
+    - gosec
+    - misspell
+    - nolintlint
+    - revive
+    - staticcheck
+    - testifylint
