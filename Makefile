@@ -11,8 +11,13 @@ OS := $(shell go env GOOS)
 ARCH := $(shell go env GOARCH)
 
 .PHONY: configure
-configure: ## Install pinned repository tools into bin
+configure: $(BIN)/golangci-lint $(BIN)/temporal ## Install pinned repository tools into bin
+
+$(BIN)/golangci-lint:
 	GOBIN=$(BIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+$(BIN)/temporal:
+	mkdir -p $(BIN)
 	curl -sSfL https://github.com/temporalio/cli/releases/download/$(TEMPORAL_CLI_VERSION)/temporal_cli_$(patsubst v%,%,$(TEMPORAL_CLI_VERSION))_$(OS)_$(ARCH).tar.gz \
 		| tar -xz -C $(BIN) temporal
 
