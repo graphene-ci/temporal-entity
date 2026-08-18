@@ -36,3 +36,16 @@ type DescribeOut[Spec, State any] struct {
 	MarkedForDeletion bool   `json:"markedForDeletion"`
 	RunID             string `json:"runId"`
 }
+
+// Wire names of the entity protocol: the lifecycle signal and the
+// describe query every entity serves. Exported so that OPERATORS — a
+// control plane driving entities it did not define in Go — can address
+// any entity generically; typed access still goes through entclient.
+const (
+	// DeleteSignalName marks an entity for deletion: drain, finalize,
+	// complete.
+	DeleteSignalName = "entity-delete"
+	// DescribeQueryName answers DescribeOut at any time, even after the
+	// workflow closed.
+	DescribeQueryName = "describe"
+)
