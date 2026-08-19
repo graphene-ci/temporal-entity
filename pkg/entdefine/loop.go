@@ -61,6 +61,15 @@ func (d *Definition[Spec, State]) workflowFn(ctx workflow.Context, env *wire.Env
 		}
 	})
 
+	// --- note signal: domain events land in history by ARRIVING; the
+	// channel is drained so nothing buffers, nothing changes state. ---
+	noteCh := workflow.GetSignalChannel(ctx, wire.NoteSignalName)
+	workflow.Go(ctx, func(gctx workflow.Context) {
+		for {
+			noteCh.Receive(gctx, nil)
+		}
+	})
+
 	// --- built-in set-labels: a label patch is a tracked mutation like
 	// any command — queued, serialized, deduplicated — but the chassis
 	// owns it so EVERY entity has it without declaring anything.

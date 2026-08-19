@@ -53,4 +53,8 @@ const (
 	// SetLabelsCommandName is the built-in label-patch command every
 	// entity serves: payload is map[string]string, empty values delete.
 	SetLabelsCommandName = "entity-set-labels"
+	// NoteSignalName carries a domain event into the entity's history —
+	// a MILESTONE, not a log line: every note is a history event and
+	// costs Continue-as-New budget. Streams belong in telemetry.
+	NoteSignalName = "entity-note"
 )

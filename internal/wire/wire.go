@@ -14,6 +14,9 @@ const (
 	DeleteSignalName     = "entity-delete"
 	DescribeQueryName    = "describe"
 	SetLabelsCommandName = "entity-set-labels"
+	// NoteSignalName carries a domain EVENT into the entity's history:
+	// fire-and-forget, no state change — the history line IS the point.
+	NoteSignalName = "entity-note"
 )
 
 // CompletedOpsCap bounds the completed-operations dedup cache carried
