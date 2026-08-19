@@ -28,13 +28,17 @@ import (
 var (
 	SearchAttrKind  = temporal.NewSearchAttributeKeyKeyword("EntityKind")
 	SearchAttrPhase = temporal.NewSearchAttributeKeyKeyword("EntityPhase")
+	// SearchAttrLabels mirrors the entity's labels as "k=v" keywords, so
+	// visibility queries can select by label: EntityLabels IN ("env=prod").
+	SearchAttrLabels = temporal.NewSearchAttributeKeyKeywordList("EntityLabels")
 )
 
 // Ctx is what command/reconcile handlers get: access to the entity's
 // desired Spec and current State. Handlers run on the main loop, so all
 // mutations are serialized by construction.
 type Ctx[Spec, State any] struct {
-	env *wire.Envelope[Spec, State]
+	env         *wire.Envelope[Spec, State]
+	labelsDirty bool
 }
 
 // Spec returns the current desired spec.
@@ -48,6 +52,24 @@ func (c *Ctx[Spec, State]) State() *State { return &c.env.State }
 
 // Phase returns the entity lifecycle phase.
 func (c *Ctx[Spec, State]) Phase() entity.Phase { return c.env.Phase }
+
+// Labels returns a copy of the entity's labels.
+func (c *Ctx[Spec, State]) Labels() map[string]string {
+	out := make(map[string]string, len(c.env.Labels))
+	for k, v := range c.env.Labels {
+		out[k] = v
+	}
+	return out
+}
+
+// SetLabel sets (or, with an empty value, removes) one label from a
+// command/reconcile handler. The search-attribute mirror follows on the
+// main loop.
+func (c *Ctx[Spec, State]) SetLabel(key, value string) {
+	if c.env.MergeLabels(map[string]string{key: value}) {
+		c.labelsDirty = true
+	}
+}
 
 // commandImpl is the wire-level form of a registered command: closures
 // decode the JSON payload into the descriptor's Req type and dispatch to
@@ -200,7 +222,7 @@ func Handle[Spec, State, Res any, Req entity.Command[Res]](
 ) *CommandRegistration[Spec, State, Req] {
 	var zero Req
 	name := zero.Name()
-	if name == "" || string(name) == wire.DeleteSignalName || string(name) == wire.DescribeQueryName {
+	if name == "" || string(name) == wire.DeleteSignalName || string(name) == wire.DescribeQueryName || string(name) == wire.SetLabelsCommandName {
 		d.errs = append(d.errs, fmt.Errorf("entity %q: reserved or empty command name %q (%s)", d.kind, name, typeName[Req]()))
 		return &CommandRegistration[Spec, State, Req]{dead: true, impl: &commandImpl[Spec, State]{}}
 	}

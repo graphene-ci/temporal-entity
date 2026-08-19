@@ -35,3 +35,22 @@ func TestRecordCompletedOverwriteKeepsOrder(t *testing.T) {
 		t.Fatal("overwrite did not replace the result")
 	}
 }
+
+func TestMergeLabels(t *testing.T) {
+	env := &Envelope[struct{}, struct{}]{}
+	if !env.MergeLabels(map[string]string{"env": "prod", "team": "ci"}) {
+		t.Fatal("first merge reported no change")
+	}
+	if env.MergeLabels(map[string]string{"env": "prod"}) {
+		t.Fatal("identical merge reported a change")
+	}
+	if !env.MergeLabels(map[string]string{"team": ""}) {
+		t.Fatal("delete reported no change")
+	}
+	if _, ok := env.Labels["team"]; ok {
+		t.Fatal("empty value did not delete the key")
+	}
+	if env.MergeLabels(map[string]string{"team": ""}) {
+		t.Fatal("deleting an absent key reported a change")
+	}
+}

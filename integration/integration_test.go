@@ -174,6 +174,7 @@ func TestEntityLifecycle(t *testing.T) {
 		SearchAttributes: temporal.NewSearchAttributes(
 			entdefine.SearchAttrKind.ValueSet("seed"),
 			entdefine.SearchAttrPhase.ValueSet("seed"),
+			entdefine.SearchAttrLabels.ValueSet([]string{"seed=seed"}),
 		),
 	})
 	if err != nil {

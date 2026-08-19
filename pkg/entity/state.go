@@ -22,6 +22,7 @@ type Snapshot[Spec, State any] struct {
 	Phase             Phase
 	Spec              Spec
 	State             State
+	Labels            map[string]string
 	PendingCommands   int
 	MarkedForDeletion bool
 }
@@ -29,12 +30,13 @@ type Snapshot[Spec, State any] struct {
 // DescribeOut is the answer to the built-in "describe" query: current
 // status plus pending work, queryable at any time without blocking.
 type DescribeOut[Spec, State any] struct {
-	Phase             Phase  `json:"phase"`
-	Spec              Spec   `json:"spec"`
-	State             State  `json:"state"`
-	PendingCommands   int    `json:"pendingCommands"`
-	MarkedForDeletion bool   `json:"markedForDeletion"`
-	RunID             string `json:"runId"`
+	Phase             Phase             `json:"phase"`
+	Spec              Spec              `json:"spec"`
+	State             State             `json:"state"`
+	Labels            map[string]string `json:"labels,omitempty"`
+	PendingCommands   int               `json:"pendingCommands"`
+	MarkedForDeletion bool              `json:"markedForDeletion"`
+	RunID             string            `json:"runId"`
 }
 
 // Wire names of the entity protocol: the lifecycle signal and the
@@ -48,4 +50,7 @@ const (
 	// DescribeQueryName answers DescribeOut at any time, even after the
 	// workflow closed.
 	DescribeQueryName = "describe"
+	// SetLabelsCommandName is the built-in label-patch command every
+	// entity serves: payload is map[string]string, empty values delete.
+	SetLabelsCommandName = "entity-set-labels"
 )

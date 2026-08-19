@@ -50,13 +50,48 @@ func (cl *Client[Spec, State]) startOptions(id entity.ResourceID) client.StartWo
 	}
 }
 
+// StartOption configures the entity at creation time (options pattern —
+// the declaration surface for instance metadata like labels).
+type StartOption func(*startConfig)
+
+type startConfig struct {
+	labels map[string]string
+}
+
+// WithLabels merges labels onto the entity at creation.
+func WithLabels(labels map[string]string) StartOption {
+	return func(c *startConfig) {
+		if c.labels == nil {
+			c.labels = map[string]string{}
+		}
+		for k, v := range labels {
+			c.labels[k] = v
+		}
+	}
+}
+
+// WithLabel sets one label at creation.
+func WithLabel(key, value string) StartOption {
+	return WithLabels(map[string]string{key: value})
+}
+
+func applyStartOptions(opts []StartOption) startConfig {
+	var c startConfig
+	for _, o := range opts {
+		o(&c)
+	}
+	return c
+}
+
 // CreateOrAttach starts the entity for id with the given desired spec, or
-// attaches to the already-running one.
-func (cl *Client[Spec, State]) CreateOrAttach(ctx context.Context, id entity.ResourceID, spec Spec) (client.WorkflowRun, error) {
+// attaches to the already-running one. Start options (labels) apply only
+// on actual creation — an existing entity keeps its own.
+func (cl *Client[Spec, State]) CreateOrAttach(ctx context.Context, id entity.ResourceID, spec Spec, opts ...StartOption) (client.WorkflowRun, error) {
 	if err := id.Validate(); err != nil {
 		return nil, err
 	}
-	env := &wire.Envelope[Spec, State]{Spec: spec}
+	c := applyStartOptions(opts)
+	env := &wire.Envelope[Spec, State]{Spec: spec, Labels: c.labels}
 	return cl.c.ExecuteWorkflow(ctx, cl.startOptions(id), string(cl.d.Kind()), env)
 }
 
@@ -124,7 +159,7 @@ func ExecWithRequestID[Spec, State, Res any, Req entity.Command[Res]](ctx contex
 // ExecWithStart atomically starts the entity if absent (with the given
 // desired spec) AND executes the command — the article's update-with-start:
 // one round trip, no create/attach race.
-func ExecWithStart[Spec, State, Res any, Req entity.Command[Res]](ctx context.Context, cl *Client[Spec, State], id entity.ResourceID, spec Spec, req Req) (Res, error) {
+func ExecWithStart[Spec, State, Res any, Req entity.Command[Res]](ctx context.Context, cl *Client[Spec, State], id entity.ResourceID, spec Spec, req Req, opts ...StartOption) (Res, error) {
 	var res Res
 	if err := id.Validate(); err != nil {
 		return res, err
@@ -133,7 +168,8 @@ func ExecWithStart[Spec, State, Res any, Req entity.Command[Res]](ctx context.Co
 	if err != nil {
 		return res, fmt.Errorf("encode %s request: %w", req.Name(), err)
 	}
-	env := &wire.Envelope[Spec, State]{Spec: spec}
+	c := applyStartOptions(opts)
+	env := &wire.Envelope[Spec, State]{Spec: spec, Labels: c.labels}
 	startOp := cl.c.NewWithStartWorkflowOperation(cl.startOptions(id), string(cl.d.Kind()), env)
 	handle, err := cl.c.UpdateWithStartWorkflow(ctx, client.UpdateWithStartWorkflowOptions{
 		StartWorkflowOperation: startOp,

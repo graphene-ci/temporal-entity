@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	"go.temporal.io/sdk/workflow"
 
@@ -29,6 +30,7 @@ func (d *Definition[Spec, State]) workflowFn(ctx workflow.Context, env *wire.Env
 			Phase:             env.Phase,
 			Spec:              env.Spec,
 			State:             env.State,
+			Labels:            env.Labels,
 			PendingCommands:   len(env.Pending),
 			MarkedForDeletion: env.MarkedForDeletion,
 			RunID:             info.WorkflowExecution.RunID,
@@ -58,6 +60,44 @@ func (d *Definition[Spec, State]) workflowFn(ctx workflow.Context, env *wire.Env
 			env.MarkedForDeletion = true
 		}
 	})
+
+	// --- built-in set-labels: a label patch is a tracked mutation like
+	// any command — queued, serialized, deduplicated — but the chassis
+	// owns it so EVERY entity has it without declaring anything.
+	err = workflow.SetUpdateHandlerWithOptions(ctx, wire.SetLabelsCommandName,
+		func(uctx workflow.Context, args wire.UpdateArgs) (json.RawMessage, error) {
+			if r, ok := env.Completed[args.RequestID]; ok {
+				return updateResult(r)
+			}
+			env.Pending = append(env.Pending, wire.CommandEnvelope{
+				RequestID: args.RequestID,
+				Name:      wire.SetLabelsCommandName,
+				Payload:   args.Payload,
+			})
+			if err := workflow.Await(uctx, func() bool {
+				_, done := env.Completed[args.RequestID]
+				return done
+			}); err != nil {
+				return nil, err
+			}
+			return updateResult(env.Completed[args.RequestID])
+		},
+		workflow.UpdateHandlerOptions{
+			Validator: func(args wire.UpdateArgs) error {
+				if env.MarkedForDeletion {
+					return fmt.Errorf("entity %s is being deleted", info.WorkflowExecution.ID)
+				}
+				var patch map[string]string
+				if err := json.Unmarshal(args.Payload, &patch); err != nil {
+					return fmt.Errorf("decode label patch: %w", err)
+				}
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("register set-labels update: %w", err)
+	}
 
 	// --- updates: tracked mutations. The handler validates, enqueues, then
 	// waits for the main loop to execute its command and returns the result
@@ -112,19 +152,19 @@ func (d *Definition[Spec, State]) workflowFn(ctx workflow.Context, env *wire.Env
 	// --- creation ---
 	if !env.Initialized {
 		env.Phase = entity.PhaseCreating
-		d.upsertSearchAttrs(ctx, env.Phase)
+		d.upsertSearchAttrs(ctx, env)
 		if d.init != nil {
 			st, err := d.init(ctx, env.Spec)
 			if err != nil {
 				env.Phase = entity.PhaseCreateFailed
-				d.upsertSearchAttrs(ctx, env.Phase)
+				d.upsertSearchAttrs(ctx, env)
 				return fmt.Errorf("entity init: %w", err)
 			}
 			env.State = st
 		}
 		env.Initialized = true
 		env.Phase = entity.PhaseReady
-		d.upsertSearchAttrs(ctx, env.Phase)
+		d.upsertSearchAttrs(ctx, env)
 	}
 
 	// --- main loop: serializes ALL side effects. One command per
@@ -136,7 +176,7 @@ func (d *Definition[Spec, State]) workflowFn(ctx workflow.Context, env *wire.Env
 		// error), in-flight handlers drain, then the finalizer runs.
 		if env.MarkedForDeletion {
 			env.Phase = entity.PhaseDeleting
-			d.upsertSearchAttrs(ctx, env.Phase)
+			d.upsertSearchAttrs(ctx, env)
 			for _, c := range env.Pending {
 				env.RecordCompleted(c.RequestID, nil,
 					fmt.Errorf("command %s rejected: entity deleted", c.Name))
@@ -150,12 +190,12 @@ func (d *Definition[Spec, State]) workflowFn(ctx workflow.Context, env *wire.Env
 			if d.finalize != nil {
 				if err := d.finalize(ctx, &env.State); err != nil {
 					env.Phase = entity.PhaseDeleteFailed
-					d.upsertSearchAttrs(ctx, env.Phase)
+					d.upsertSearchAttrs(ctx, env)
 					return fmt.Errorf("entity finalize: %w", err)
 				}
 			}
 			env.Phase = entity.PhaseDeleted
-			d.upsertSearchAttrs(ctx, env.Phase)
+			d.upsertSearchAttrs(ctx, env)
 			return nil
 		}
 
@@ -163,6 +203,17 @@ func (d *Definition[Spec, State]) workflowFn(ctx workflow.Context, env *wire.Env
 		if len(env.Pending) > 0 {
 			c := env.Pending[0]
 			env.Pending = env.Pending[1:]
+			if string(c.Name) == wire.SetLabelsCommandName {
+				var patch map[string]string
+				err := json.Unmarshal(c.Payload, &patch)
+				if err == nil && env.MergeLabels(patch) {
+					ec.labelsDirty = true
+				}
+				env.RecordCompleted(c.RequestID, nil, err)
+				processedThisRun++
+				d.mirrorLabels(ctx, ec, env)
+				continue
+			}
 			cmd, ok := d.commands[c.Name]
 			if !ok {
 				env.RecordCompleted(c.RequestID, nil, fmt.Errorf("unknown command %q", c.Name))
@@ -174,6 +225,7 @@ func (d *Definition[Spec, State]) workflowFn(ctx workflow.Context, env *wire.Env
 			}
 			env.RecordCompleted(c.RequestID, res, err)
 			processedThisRun++
+			d.mirrorLabels(ctx, ec, env)
 			continue
 		}
 
@@ -222,16 +274,38 @@ func (d *Definition[Spec, State]) canWanted(info *workflow.Info, processed int) 
 	return d.forceCANEvery > 0 && processed >= d.forceCANEvery
 }
 
-func (d *Definition[Spec, State]) upsertSearchAttrs(ctx workflow.Context, phase entity.Phase) {
+func (d *Definition[Spec, State]) upsertSearchAttrs(ctx workflow.Context, env *wire.Envelope[Spec, State]) {
 	if !d.useSearchAttrs {
 		return
 	}
 	if err := workflow.UpsertTypedSearchAttributes(ctx,
 		SearchAttrKind.ValueSet(string(d.kind)),
-		SearchAttrPhase.ValueSet(string(phase)),
+		SearchAttrPhase.ValueSet(string(env.Phase)),
+		SearchAttrLabels.ValueSet(labelValues(env.Labels)),
 	); err != nil {
 		workflow.GetLogger(ctx).Error("upsert search attributes failed", "error", err)
 	}
+}
+
+// mirrorLabels re-upserts the search attributes when a handler or the
+// built-in patch changed labels since the last mirror.
+func (d *Definition[Spec, State]) mirrorLabels(ctx workflow.Context, ec *Ctx[Spec, State], env *wire.Envelope[Spec, State]) {
+	if !ec.labelsDirty {
+		return
+	}
+	ec.labelsDirty = false
+	d.upsertSearchAttrs(ctx, env)
+}
+
+// labelValues renders labels as sorted "k=v" keywords — the visibility
+// form: EntityLabels IN ("env=prod").
+func labelValues(labels map[string]string) []string {
+	out := make([]string, 0, len(labels))
+	for k, v := range labels {
+		out = append(out, k+"="+v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func updateResult(r wire.OpResult) (json.RawMessage, error) {

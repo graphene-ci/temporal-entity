@@ -73,3 +73,14 @@ func DescribeRaw(ctx context.Context, c client.Client, workflowID string) (json.
 	}
 	return out, nil
 }
+
+// SetLabelsRaw patches any entity's labels by wire identity: empty
+// values delete keys. The chassis serves this on every entity.
+func SetLabelsRaw(ctx context.Context, c client.Client, workflowID string, patch map[string]string) error {
+	payload, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("encode label patch: %w", err)
+	}
+	_, err = ExecRaw(ctx, c, workflowID, entity.SetLabelsCommandName, payload, "")
+	return err
+}

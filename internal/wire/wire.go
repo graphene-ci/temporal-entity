@@ -9,10 +9,11 @@ import (
 	"github.com/graphene-ci/temporal-entity/pkg/entity"
 )
 
-// Reserved signal/query names of the chassis.
+// Reserved signal/query/command names of the chassis.
 const (
-	DeleteSignalName  = "entity-delete"
-	DescribeQueryName = "describe"
+	DeleteSignalName     = "entity-delete"
+	DescribeQueryName    = "describe"
+	SetLabelsCommandName = "entity-set-labels"
 )
 
 // CompletedOpsCap bounds the completed-operations dedup cache carried
@@ -57,6 +58,11 @@ type Envelope[Spec, State any] struct {
 	Spec  Spec  `json:"spec"`
 	State State `json:"state"`
 
+	// Labels are the entity's markers — metric-label semantics: small
+	// string pairs for selection and grouping, never data. Mirrored to
+	// the EntityLabels search attribute as "k=v" values.
+	Labels map[string]string `json:"labels,omitempty"`
+
 	MarkedForDeletion bool `json:"markedForDeletion"`
 
 	Pending []CommandEnvelope `json:"pending"`
@@ -93,7 +99,42 @@ func (e *Envelope[Spec, State]) Snapshot() entity.Snapshot[Spec, State] {
 		Phase:             e.Phase,
 		Spec:              e.Spec,
 		State:             e.State,
+		Labels:            copyLabels(e.Labels),
 		PendingCommands:   len(e.Pending),
 		MarkedForDeletion: e.MarkedForDeletion,
 	}
+}
+
+// MergeLabels applies a label patch: empty values delete keys, the rest
+// overwrite. Returns whether anything changed.
+func (e *Envelope[Spec, State]) MergeLabels(patch map[string]string) bool {
+	changed := false
+	for k, v := range patch {
+		if v == "" {
+			if _, ok := e.Labels[k]; ok {
+				delete(e.Labels, k)
+				changed = true
+			}
+			continue
+		}
+		if e.Labels[k] != v {
+			if e.Labels == nil {
+				e.Labels = map[string]string{}
+			}
+			e.Labels[k] = v
+			changed = true
+		}
+	}
+	return changed
+}
+
+func copyLabels(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
