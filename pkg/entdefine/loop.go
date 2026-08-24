@@ -163,17 +163,49 @@ func (d *Definition[Spec, State]) workflowFn(ctx workflow.Context, env *wire.Env
 		env.Phase = entity.PhaseCreating
 		d.upsertSearchAttrs(ctx, env)
 		if d.init != nil {
-			st, err := d.init(ctx, env.Spec)
-			if err != nil {
+			// Init runs INTERRUPTIBLY: a delete signal cancels it and
+			// the lifecycle proceeds straight to the finalizer —
+			// creation retrying against a broken world (a cloud that
+			// keeps refusing) must never block deletion.
+			initCtx, cancelInit := workflow.WithCancel(ctx)
+			var st State
+			var initErr error
+			initDone := false
+			workflow.Go(initCtx, func(gctx workflow.Context) {
+				st, initErr = d.init(gctx, env.Spec)
+				initDone = true
+			})
+			if err := workflow.Await(ctx, func() bool { return initDone || env.MarkedForDeletion }); err != nil {
+				cancelInit()
+				return err
+			}
+			if !initDone {
+				cancelInit()
+				if err := workflow.Await(ctx, func() bool { return initDone }); err != nil {
+					return err
+				}
+			}
+			// Best-effort state survives a failed or aborted init: the
+			// finalizer tears down whatever the half-created world left.
+			env.State = st
+			switch {
+			case initErr == nil:
+				env.Initialized = true
+				env.Phase = entity.PhaseReady
+				d.upsertSearchAttrs(ctx, env)
+			case env.MarkedForDeletion:
+				// Aborted by deletion: fall through — the main loop
+				// enters the deletion path and runs the finalizer.
+			default:
 				env.Phase = entity.PhaseCreateFailed
 				d.upsertSearchAttrs(ctx, env)
-				return fmt.Errorf("entity init: %w", err)
+				return fmt.Errorf("entity init: %w", initErr)
 			}
-			env.State = st
+		} else {
+			env.Initialized = true
+			env.Phase = entity.PhaseReady
+			d.upsertSearchAttrs(ctx, env)
 		}
-		env.Initialized = true
-		env.Phase = entity.PhaseReady
-		d.upsertSearchAttrs(ctx, env)
 	}
 
 	// --- main loop: serializes ALL side effects. One command per
