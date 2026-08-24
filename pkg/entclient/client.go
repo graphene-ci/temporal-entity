@@ -8,11 +8,15 @@ package entclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/graphene-ci/temporal-entity/internal/wire"
 	"github.com/graphene-ci/temporal-entity/pkg/entdefine"
@@ -144,16 +148,48 @@ func ExecWithRequestID[Spec, State, Res any, Req entity.Command[Res]](ctx contex
 	if err != nil {
 		return res, fmt.Errorf("encode %s request: %w", req.Name(), err)
 	}
-	handle, err := cl.c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
-		WorkflowID:   cl.WorkflowID(id),
-		UpdateName:   string(req.Name()),
-		Args:         []any{wire.UpdateArgs{RequestID: requestID, Payload: payload}},
-		WaitForStage: client.WorkflowUpdateStageCompleted,
+	return decodeRaw[Res](func(out *json.RawMessage) error {
+		return withCANRetry(ctx, func() error {
+			handle, err := cl.c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
+				WorkflowID:   cl.WorkflowID(id),
+				UpdateName:   string(req.Name()),
+				Args:         []any{wire.UpdateArgs{RequestID: requestID, Payload: payload}},
+				WaitForStage: client.WorkflowUpdateStageCompleted,
+			})
+			if err != nil {
+				return err
+			}
+			return handle.Get(ctx, out)
+		})
 	})
-	if err != nil {
-		return res, err
+}
+
+// withCANRetry absorbs the update-versus-Continue-as-New race: an
+// update ACCEPTED by a run that continued-as-new before completing it
+// fails with AcceptedUpdateCompletedWorkflow. The command travels in
+// the envelope and dedups by request id, so the same update against
+// the fresh run either finds the recorded result or enqueues once.
+func withCANRetry(ctx context.Context, call func() error) error {
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		if err = call(); err == nil || !isCANRace(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 200 * time.Millisecond):
+		}
 	}
-	return decodeRaw[Res](func(out *json.RawMessage) error { return handle.Get(ctx, out) })
+	return err
+}
+
+func isCANRace(err error) bool {
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == "AcceptedUpdateCompletedWorkflow" {
+		return true
+	}
+	return strings.Contains(err.Error(), "Workflow completed before the Update completed")
 }
 
 // ExecWithStart atomically starts the entity if absent (with the given
@@ -169,20 +205,25 @@ func ExecWithStart[Spec, State, Res any, Req entity.Command[Res]](ctx context.Co
 		return res, fmt.Errorf("encode %s request: %w", req.Name(), err)
 	}
 	c := applyStartOptions(opts)
-	env := &wire.Envelope[Spec, State]{Spec: spec, Labels: c.labels}
-	startOp := cl.c.NewWithStartWorkflowOperation(cl.startOptions(id), string(cl.d.Kind()), env)
-	handle, err := cl.c.UpdateWithStartWorkflow(ctx, client.UpdateWithStartWorkflowOptions{
-		StartWorkflowOperation: startOp,
-		UpdateOptions: client.UpdateWorkflowOptions{
-			UpdateName:   string(req.Name()),
-			Args:         []any{wire.UpdateArgs{RequestID: entity.RequestID(uuid.NewString()), Payload: payload}},
-			WaitForStage: client.WorkflowUpdateStageCompleted,
-		},
+	requestID := entity.RequestID(uuid.NewString())
+	return decodeRaw[Res](func(out *json.RawMessage) error {
+		return withCANRetry(ctx, func() error {
+			env := &wire.Envelope[Spec, State]{Spec: spec, Labels: c.labels}
+			startOp := cl.c.NewWithStartWorkflowOperation(cl.startOptions(id), string(cl.d.Kind()), env)
+			handle, err := cl.c.UpdateWithStartWorkflow(ctx, client.UpdateWithStartWorkflowOptions{
+				StartWorkflowOperation: startOp,
+				UpdateOptions: client.UpdateWorkflowOptions{
+					UpdateName:   string(req.Name()),
+					Args:         []any{wire.UpdateArgs{RequestID: requestID, Payload: payload}},
+					WaitForStage: client.WorkflowUpdateStageCompleted,
+				},
+			})
+			if err != nil {
+				return err
+			}
+			return handle.Get(ctx, out)
+		})
 	})
-	if err != nil {
-		return res, err
-	}
-	return decodeRaw[Res](func(out *json.RawMessage) error { return handle.Get(ctx, out) })
 }
 
 // Read runs a read-only query against the entity; the query value is the
