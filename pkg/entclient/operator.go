@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	enums "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 
 	"github.com/graphene-ci/temporal-entity/internal/wire"
@@ -83,4 +84,32 @@ func SetLabelsRaw(ctx context.Context, c client.Client, workflowID string, patch
 	}
 	_, err = ExecRaw(ctx, c, workflowID, entity.SetLabelsCommandName, payload, "")
 	return err
+}
+
+// ApplyRaw declares an entity by WIRE IDENTITY: kind, id and a spec
+// that is only JSON here. This is what a control plane needs to create
+// records of kinds it does not have Go definitions for — the same
+// create-or-attach as the typed path, so declaring twice attaches
+// instead of forking.
+//
+// The kind's own Init validates the spec: an operator cannot smuggle a
+// shape past the definition, it can only fail to satisfy it.
+func ApplyRaw(ctx context.Context, c client.Client, kind entity.KindName, id entity.ResourceID, taskQueue string, spec json.RawMessage, labels map[string]string) (string, error) {
+	if kind == "" || id == "" {
+		return "", fmt.Errorf("kind and id are required")
+	}
+	if err := id.Validate(); err != nil {
+		return "", err
+	}
+	workflowID := string(kind) + "/" + string(id)
+	env := wire.Envelope[json.RawMessage, json.RawMessage]{Spec: spec, Labels: labels}
+	run, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID:                       workflowID,
+		TaskQueue:                taskQueue,
+		WorkflowIDConflictPolicy: enums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+	}, string(kind), &env)
+	if err != nil {
+		return "", err
+	}
+	return run.GetID(), nil
 }
