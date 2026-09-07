@@ -3,6 +3,7 @@
 // is what a control plane needs to drive entities its users defined:
 // the typed surface (Exec/Read) stays the right tool when the
 // definition is compiled in.
+
 package entclient
 
 import (
