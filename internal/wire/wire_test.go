@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"go.temporal.io/sdk/temporal"
+
 	"github.com/graphene-ci/temporal-entity/pkg/entity"
 )
 
@@ -52,5 +54,33 @@ func TestMergeLabels(t *testing.T) {
 	}
 	if env.MergeLabels(map[string]string{"team": ""}) {
 		t.Fatal("deleting an absent key reported a change")
+	}
+}
+
+// A refusal's code survives the cache: the message alone is kept as Err,
+// the code as ErrType; a plain error stays text.
+func TestRecordCompletedKeepsRefusalCode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		err      error
+		wantErr  string
+		wantType string
+	}{
+		{name: "refusal", err: temporal.NewNonRetryableApplicationError("leased by r1", "busy", nil), wantErr: "leased by r1", wantType: "busy"},
+		{name: "wrapped refusal", err: fmt.Errorf("acquire: %w", temporal.NewApplicationError("leaks", "dirty")), wantErr: "leaks", wantType: "dirty"},
+		{name: "plain error", err: errors.New("boom"), wantErr: "boom"},
+		{name: "untyped application error", err: temporal.NewApplicationError("x", ""), wantErr: "x"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			var e Envelope[struct{}, struct{}]
+			e.RecordCompleted("req", nil, c.err)
+			got := e.Completed["req"]
+			if got.ErrType != c.wantType || (c.wantType != "" && got.Err != c.wantErr) {
+				t.Fatalf("got %+v, want err %q type %q", got, c.wantErr, c.wantType)
+			}
+		})
 	}
 }

@@ -5,6 +5,9 @@ package wire
 
 import (
 	"encoding/json"
+	"errors"
+
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/graphene-ci/temporal-entity/pkg/entity"
 )
@@ -46,6 +49,10 @@ type CommandEnvelope struct {
 type OpResult struct {
 	Result json.RawMessage `json:"result,omitempty"`
 	Err    string          `json:"err,omitempty"`
+	// ErrType is a refusal's stable code — the Type of the handler's
+	// temporal.ApplicationError — so a caller branches on it after the
+	// outcome was cached and replayed, never on the message.
+	ErrType string `json:"errType,omitempty"`
 }
 
 // Envelope is the compact, resumable state of one entity — exactly what
@@ -83,6 +90,10 @@ func (e *Envelope[S, T]) RecordCompleted(requestID entity.RequestID, res json.Ra
 	r := OpResult{Result: res}
 	if err != nil {
 		r.Err = err.Error()
+		var app *temporal.ApplicationError
+		if errors.As(err, &app) && app.Type() != "" {
+			r.Err, r.ErrType = app.Message(), app.Type()
+		}
 	}
 	if _, exists := e.Completed[requestID]; !exists {
 		e.CompletedOrder = append(e.CompletedOrder, requestID)

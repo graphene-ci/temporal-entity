@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/graphene-ci/temporal-entity/internal/wire"
@@ -350,6 +351,10 @@ func labelValues(labels map[string]string) []string {
 }
 
 func updateResult(r wire.OpResult) (json.RawMessage, error) {
+	if r.ErrType != "" {
+		// A refusal keeps its code across the update boundary.
+		return nil, temporal.NewNonRetryableApplicationError(r.Err, r.ErrType, nil)
+	}
 	if r.Err != "" {
 		return nil, errors.New(r.Err)
 	}

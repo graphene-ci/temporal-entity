@@ -9,6 +9,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -48,6 +49,12 @@ func (b BlueGreen) Validate() error {
 	}
 	return nil
 }
+
+// Refuse is a command the entity always declines with a stable code.
+type Refuse struct{}
+
+func (Refuse) Name() entity.CommandName { return "refuse" }
+func (Refuse) Result() BlueGreenRes     { return BlueGreenRes{} }
 
 type Health struct{}
 type HealthRes struct {
@@ -153,6 +160,12 @@ func newDeploymentKind() *k8slib.Kind[Deployment] {
 		},
 	)
 
+	entdefine.Handle(k.Def(),
+		func(workflow.Context, *k8slib.Ctx[Deployment], Refuse) (BlueGreenRes, error) {
+			return BlueGreenRes{}, temporal.NewNonRetryableApplicationError("not now", "busy", nil)
+		},
+	)
+
 	entdefine.HandleQuery(k.Def(),
 		func(s k8slib.Snap[Deployment], _ Health) (HealthRes, error) {
 			return HealthRes{Ready: s.State.Ready, Heals: s.State.Heals, Drifted: s.State.Drifted}, nil
@@ -244,6 +257,15 @@ func TestEntityLifecycle(t *testing.T) {
 	// 2b. Command's own Validate() rejects too.
 	if _, err := entclient.Exec(ctx, web, webID, BlueGreen{}); err == nil {
 		t.Fatal("empty blue-green accepted")
+	}
+	// 2c. A handler's refusal reaches the caller with its code — also when
+	// the same request is answered again from the dedup cache.
+	for range 2 {
+		_, err := entclient.ExecRaw(ctx, c, web.WorkflowID(webID), "refuse", []byte(`{}`), "refuse-1")
+		var app *temporal.ApplicationError
+		if !errors.As(err, &app) || app.Type() != "busy" {
+			t.Fatalf("refusal lost its code: %T %v", err, err)
+		}
 	}
 
 	// 3. Drift injection -> reconcile tick heals.

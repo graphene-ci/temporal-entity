@@ -1,11 +1,14 @@
 package entdefine
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/graphene-ci/temporal-entity/internal/wire"
 	"github.com/graphene-ci/temporal-entity/pkg/entity"
 )
 
@@ -125,4 +128,33 @@ func TestDeadRegistrationValidateIsNoop(_ *testing.T) {
 	Handle(d, handlerFor[cmdOK]())
 	// Duplicate registration is dead; attaching a validator must not panic.
 	Handle(d, handlerFor[cmdDup]()).Validate(func(entity.Snapshot[tSpec, tState], cmdDup) error { return nil })
+}
+
+// A cached refusal answers with its code, so a deduplicated retry of a
+// refused command is refused the same way.
+func TestUpdateResultRestoresRefusalCode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		r    wire.OpResult
+		code string
+		fail bool
+	}{
+		{name: "refusal", r: wire.OpResult{Err: "leased by r1", ErrType: "busy"}, code: "busy", fail: true},
+		{name: "plain error", r: wire.OpResult{Err: "boom"}, fail: true},
+		{name: "success", r: wire.OpResult{Result: []byte(`{}`)}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := updateResult(c.r)
+			if (err != nil) != c.fail {
+				t.Fatalf("err = %v", err)
+			}
+			var app *temporal.ApplicationError
+			if c.code != "" && (!errors.As(err, &app) || app.Type() != c.code || app.Message() != c.r.Err) {
+				t.Fatalf("err = %v, want code %s", err, c.code)
+			}
+		})
+	}
 }
